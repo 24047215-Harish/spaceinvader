@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Player Ship</title>
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #111;
+    }
+
+    canvas {
+      display: block;
+      border: 1px solid #333;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="game" width="800" height="600"></canvas>
+
+  <script>
+    const canvas = document.getElementById("game");
+    const context = canvas.getContext("2d");
+
+    const player = {
+      width: 40,
+      height: 20,
+      x: (canvas.width - 40) / 2,
+      y: canvas.height - 50,
+      speed: 300,
+      lives: 3,
+      invulnerable: 0
+    };
+
+    const invaders = [];
+    const invaderWidth = 40;
+    const invaderHeight = 28;
+    const invaderRows = 5;
+    const invaderColumns = 11;
+    const invaderGapX = 18;
+    const invaderGapY = 16;
+    const invaderStartX = 95;
+    const invaderStartY = 55;
+    let invaderSpeed = 35;
+    const invaderColors = ["#ff3b30", "#ff9500", "#32d74b", "#64d2ff", "#bf5af2"];
+    let level = 1;
+    let score = 0;
+
+    const barriers = [];
+    const barrierCellWidth = 8;
+    const barrierCellHeight = 8;
+    const barrierColumns = 12;
+    const barrierRows = 6;
+
+    function createBarriers() {
+      barriers.length = 0;
+      const barrierPositions = [120, 300, 480, 660];
+
+      barrierPositions.forEach((startX) => {
+        for (let row = 0; row < barrierRows; row++) {
+          for (let column = 0; column < barrierColumns; column++) {
+            const inTopCorners = row === 0 && (column < 3 || column > 8);
+            const inBottomCorners = row === barrierRows - 1 &&
+              (column < 2 || column > 9);
+            const inBottomNotch = row >= 4 && column >= 5 && column <= 6;
+
+            if (!inTopCorners && !inBottomCorners && !inBottomNotch) {
+              barriers.push({
+                x: startX + column * barrierCellWidth,
+                y: 470 + row * barrierCellHeight,
+                width: barrierCellWidth,
+                height: barrierCellHeight,
+                health: 4
+              });
+            }
+          }
+        }
+      });
+    }
+
+    createBarriers();
+
+    function createInvaders() {
+      invaders.length = 0;
+      for (let row = 0; row < invaderRows; row++) {
+        for (let column = 0; column < invaderColumns; column++) {
+          invaders.push({
+            x: invaderStartX + column * (invaderWidth + invaderGapX),
+            y: invaderStartY + row * (invaderHeight + invaderGapY),
+            width: invaderWidth,
+            height: invaderHeight,
+            row
+          });
+        }
+      }
+    }
+
+    createInvaders();
+
+    let invaderDirection = 1;
+    const playerBullets = [];
+    const invaderBullets = [];
+    const bulletWidth = 4;
+    const bulletHeight = 12;
+    const playerBulletSpeed = 500;
+    const invaderBulletSpeed = 260;
+    let playerFireCooldown = 0;
+    let invaderFireTimer = 1;
+    let gameOver = false;
+    let audioContext = null;
+
+    function playTone(frequency, duration, type = "square", volume = 0.04) {
+      if (!audioContext) {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      }
+
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      oscillator.type = type;
+      oscillator.frequency.setValueAtTime(frequency, audioContext.currentTime);
+      gain.gain.setValueAtTime(volume, audioContext.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + duration);
+      oscillator.connect(gain);
+      gain.connect(audioContext.destination);
+      oscillator.start();
+      oscillator.stop(audioContext.currentTime + duration);
+    }
+
+    function playShootSound() {
+      playTone(650, 0.07, "square", 0.025);
+    }
+
+    function playExplosionSound() {
+      playTone(130, 0.18, "sawtooth", 0.055);
+    }
+
+    function playGameOverSound() {
+      playTone(220, 0.12, "square", 0.05);
+      setTimeout(() => playTone(110, 0.35, "square", 0.05), 140);
+    }
+
+    const keys = {
+      ArrowLeft: false,
+      ArrowRight: false,
+      Space: false
+    };
+
+    window.addEventListener("keydown", (event) => {
+      if (gameOver) {
+        event.preventDefault();
+        restartGame();
+        return;
+      }
+
+      if (event.key === " " || event.code === "Space") {
+        event.preventDefault();
+        keys.Space = true;
+      } else if (event.key in keys) {
+        event.preventDefault();
+        keys[event.key] = true;
+      }
+    });
+
+    window.addEventListener("keyup", (event) => {
+      if (event.key === " " || event.code === "Space") {
+        event.preventDefault();
+        keys.Space = false;
+      } else if (event.key in keys) {
+        event.preventDefault();
+        keys[event.key] = false;
+      }
+    });
+
+    let previousTime = 0;
+
+    function overlaps(a, b) {
+      return a.x < b.x + b.width &&
+        a.x + a.width > b.x &&
+        a.y < b.y + b.height &&
+        a.y + a.height > b.y;
+    }
+
+    function resetPlayer() {
+      player.x = (canvas.width - player.width) / 2;
+      player.invulnerable = 1.5;
+    }
+
+    function restartGame() {
+      player.lives = 3;
+      player.invulnerable = 0;
+      resetPlayer();
+      playerBullets.length = 0;
+      invaderBullets.length = 0;
+      invaderDirection = 1;
+      invaderSpeed = 35;
+      invaderFireTimer = 1;
+      level = 1;
+      score = 0;
+      gameOver = false;
+      createInvaders();
+      createBarriers();
+      previousTime = performance.now();
+    }
+
+    function startNextLevel() {
+      level++;
+      invaderSpeed += 12;
+      invaderDirection = 1;
+      invaderFireTimer = 1;
+      playerBullets.length = 0;
+      invaderBullets.length = 0;
+      resetPlayer();
+      createInvaders();
+      createBarriers();
+    }
+
+    function update(deltaTime) {
+      if (gameOver) {
+        return;
+      }
+
+      if (keys.ArrowLeft) {
+        player.x -= player.speed * deltaTime;
+      }
+      if (keys.ArrowRight) {
+        player.x += player.speed * deltaTime;
+      }
+
+      player.x = Math.max(0, Math.min(canvas.width - player.width, player.x));
+      playerFireCooldown -= deltaTime;
+      player.invulnerable = Math.max(0, player.invulnerable - deltaTime);
+
+      if (keys.Space && playerFireCooldown <= 0) {
+        playerBullets.push({
+          x: player.x + player.width / 2 - bulletWidth / 2,
+          y: player.y - bulletHeight,
+          width: bulletWidth,
+          height: bulletHeight
+        });
+        playShootSound();
+        playerFireCooldown = 0.25;
+      }
+
+      const edgeReached = invaders.some((invader) =>
+        invaderDirection > 0
+          ? invader.x + invader.width >= canvas.width - 20
+          : invader.x <= 20
+      );
+
+      if (edgeReached) {
+        invaderDirection *= -1;
+        for (const invader of invaders) {
+          invader.y += invaderHeight + invaderGapY;
+        }
+      } else {
+        for (const invader of invaders) {
+          invader.x += invaderSpeed * invaderDirection * deltaTime;
+        }
+      }
+
+      invaderFireTimer -= deltaTime;
+      if (invaderFireTimer <= 0 && invaders.length > 0) {
+        const bottomInvaders = invaders.filter((invader) =>
+          !invaders.some((other) =>
+            other.x < invader.x + invader.width &&
+            other.x + other.width > invader.x &&
+            other.y > invader.y
+          )
+        );
+        const shooter = bottomInvaders[Math.floor(Math.random() * bottomInvaders.length)];
+        invaderBullets.push({
+          x: shooter.x + shooter.width / 2 - bulletWidth / 2,
+          y: shooter.y + shooter.height,
+          width: bulletWidth,
+          height: bulletHeight
+        });
+        invaderFireTimer = 0.7 + Math.random() * 0.8;
+      }
+
+      for (const bullet of playerBullets) {
+        bullet.y -= playerBulletSpeed * deltaTime;
+      }
+      for (const bullet of invaderBullets) {
+        bullet.y += invaderBulletSpeed * deltaTime;
+      }
+
+      for (let bulletIndex = playerBullets.length - 1; bulletIndex >= 0; bulletIndex--) {
+        const bullet = playerBullets[bulletIndex];
+        const invaderIndex = invaders.findIndex((invader) => overlaps(bullet, invader));
+        const barrierIndex = barriers.findIndex((barrier) => overlaps(bullet, barrier));
+
+        if (invaderIndex !== -1) {
+          invaders.splice(invaderIndex, 1);
+          playerBullets.splice(bulletIndex, 1);
+          score++;
+          playExplosionSound();
+        } else if (barrierIndex !== -1) {
+          const barrier = barriers[barrierIndex];
+          barrier.health--;
+          playerBullets.splice(bulletIndex, 1);
+          if (barrier.health <= 0) {
+            barriers.splice(barrierIndex, 1);
+          }
+        } else if (bullet.y + bullet.height < 0) {
+          playerBullets.splice(bulletIndex, 1);
+        }
+      }
+
+      for (let bulletIndex = invaderBullets.length - 1; bulletIndex >= 0; bulletIndex--) {
+        const bullet = invaderBullets[bulletIndex];
+        const barrierIndex = barriers.findIndex((barrier) => overlaps(bullet, barrier));
+
+        if (barrierIndex !== -1) {
+          const barrier = barriers[barrierIndex];
+          barrier.health--;
+          invaderBullets.splice(bulletIndex, 1);
+          if (barrier.health <= 0) {
+            barriers.splice(barrierIndex, 1);
+          }
+        } else if (player.invulnerable <= 0 && overlaps(bullet, player)) {
+          invaderBullets.splice(bulletIndex, 1);
+          player.lives--;
+          playExplosionSound();
+
+          if (player.lives <= 0) {
+            gameOver = true;
+            playGameOverSound();
+          } else {
+            resetPlayer();
+          }
+        } else if (bullet.y > canvas.height) {
+          invaderBullets.splice(bulletIndex, 1);
+        }
+      }
+
+      if (invaders.length === 0) {
+        startNextLevel();
+      }
+
+      for (const invader of invaders) {
+        if (overlaps(invader, player) || invader.y + invader.height >= canvas.height) {
+          gameOver = true;
+          playGameOverSound();
+        }
+      }
+    }
+
+    function draw() {
+      context.fillStyle = "black";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+
+      invaders.forEach((invader) => {
+        context.fillStyle = invaderColors[invader.row];
+        context.fillRect(invader.x + 8, invader.y, 24, 4);
+        context.fillRect(invader.x + 4, invader.y + 4, 32, 8);
+        context.fillRect(invader.x, invader.y + 12, 40, 8);
+        context.fillRect(invader.x + 8, invader.y + 20, 8, 8);
+        context.fillRect(invader.x + 24, invader.y + 20, 8, 8);
+        context.fillRect(invader.x, invader.y + 12, 8, 4);
+        context.fillRect(invader.x + 32, invader.y + 12, 8, 4);
+        context.fillStyle = "black";
+        context.fillRect(invader.x + 8, invader.y + 8, 6, 6);
+        context.fillRect(invader.x + 26, invader.y + 8, 6, 6);
+      });
+
+      barriers.forEach((barrier) => {
+        const damageColors = ["#4a1f1f", "#804040", "#b86b2d", "#32d74b"];
+        context.fillStyle = damageColors[barrier.health - 1];
+        context.fillRect(barrier.x, barrier.y, barrier.width, barrier.height);
+      });
+
+      context.fillStyle = "#00ff00";
+      for (const bullet of playerBullets) {
+        context.fillRect(bullet.x, bullet.y, bullet.width, bullet.height);
+      }
+
+      context.fillStyle = "#ff3b30";
+      for (const bullet of invaderBullets) {
+        context.fillRect(bullet.x, bullet.y, bullet.width, bullet.height);
+      }
+
+      if (player.invulnerable <= 0 || Math.floor(player.invulnerable * 10) % 2 === 0) {
+        context.fillStyle = "white";
+        context.fillRect(player.x, player.y, player.width, player.height);
+      }
+
+      context.fillStyle = "white";
+      context.font = "18px monospace";
+      context.textAlign = "left";
+      context.fillText(`Lives: ${player.lives}`, 20, 28);
+      context.fillText(`Level: ${level}`, 20, 52);
+      context.textAlign = "right";
+      context.fillText(`Score: ${score}`, canvas.width - 20, 28);
+
+      if (gameOver) {
+        context.textAlign = "center";
+        context.font = "48px monospace";
+        context.fillText("GAME OVER", canvas.width / 2, canvas.height / 2);
+        context.font = "22px monospace";
+        context.fillText("Press any key to restart", canvas.width / 2, canvas.height / 2 + 40);
+      }
+    }
+
+    function animate(currentTime) {
+      const deltaTime = (currentTime - previousTime) / 1000;
+      previousTime = currentTime;
+
+      update(Math.min(deltaTime, 0.05));
+      draw();
+      requestAnimationFrame(animate);
+    }
+
+    draw();
+    requestAnimationFrame(animate);
+  </script>
+</body>
+</html>
